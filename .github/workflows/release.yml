@@ -45,8 +45,13 @@ jobs:
           # published with a green tick next to it.
           sed -i -E "s|^  url \".*\"|  url \"${{ steps.tarball.outputs.url }}\"|" "$f"
           sed -i -E "s|^  sha256 \".*\"|  sha256 \"${{ steps.tarball.outputs.sha }}\"|" "$f"
+          # A `revision` belongs to the version it was added to. Carried into
+          # the next one it would say this new version was already revised
+          # once, which is a lie about what people have installed.
+          sed -i -E "/^  revision [0-9]+$/d" "$f"
           grep -q "${{ steps.tarball.outputs.url }}" "$f" || { echo "url did not change"; exit 1; }
           grep -q "${{ steps.tarball.outputs.sha }}" "$f" || { echo "sha did not change"; exit 1; }
+          ! grep -q "^  revision " "$f" || { echo "a revision survived the bump"; exit 1; }
           git -C tap diff --stat
 
       - name: Push it
