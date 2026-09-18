@@ -84,7 +84,7 @@ class FakeSayTestCase(unittest.TestCase):
         Cut at the rate, not at a count of spaces. A voice name can hold a
         space, and `Samantha (Enhanced)` does.
         """
-        return [re.sub(r"^.*?-r \d+ ", "", line) for line in self.calls()]
+        return [re.sub(r"^.*?-r \d+ -- ", "", line) for line in self.calls()]
 
 
 BLOCKS = [
@@ -126,6 +126,100 @@ class BestVoiceTest(FakeSayTestCase):
         self.set_voices()      # an empty list would break any lookup
         block = parse.Block(kind="prose", line=1, lang="en", sentences=["Hi."])
         self.assertEqual(speak.voice_for(block, "Albert"), "Albert")
+
+
+class SentenceStartingWithADashTest(FakeSayTestCase):
+    """A sentence that looks like a flag. Real `say`, not the fake one.
+
+    The fake would happily accept anything, so it cannot fail the way `say`
+    does. This one calls `say -o` for real and writes to a file, so it makes
+    no sound and still proves the command line is right.
+    """
+
+    def test_real_say_accepts_a_sentence_that_starts_with_two_dashes(self):
+        os.environ["PATH"] = self.old_path      # step over the fake
+        out = self.root / "out.aiff"
+        done = subprocess.run(
+            ["say", "-r", "300", "-o", str(out), "--",
+             "--voice overrides all of it, and it is only text here."],
+            capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(out.exists())
+
+    def test_the_dash_dash_is_in_the_command(self):
+        speak.start_say("--from is a flag.", "Samantha", 220).wait()
+        self.assertIn("--", self.calls()[0].split())
+
+
+class HowLongTest(unittest.TestCase):
+    """The words, turned into a length a person can plan around."""
+
+    def blocks(self, *counts):
+        """One block per number, holding that many one word sentences."""
+        return [parse.Block(kind="prose", line=1, lang="en",
+                            sentences=["word"] * n) for n in counts]
+
+    def test_it_counts_every_sentence_of_every_block(self):
+        seconds = speak.reading_seconds(self.blocks(3, 4), 0, rate=60)
+        # 7 words at 60 a minute is 7 seconds, plus the correction.
+        self.assertAlmostEqual(seconds, 7 * speak.SLOWER_THAN_IT_SAYS, places=6)
+
+    def test_starting_later_counts_less(self):
+        both = speak.reading_seconds(self.blocks(3, 4), 0, rate=60)
+        second = speak.reading_seconds(self.blocks(3, 4), 1, rate=60)
+        self.assertLess(second, both)
+        self.assertAlmostEqual(second, 4 * speak.SLOWER_THAN_IT_SAYS, places=6)
+
+    def test_a_faster_rate_takes_less_time(self):
+        slow = speak.reading_seconds(self.blocks(100), 0, rate=180)
+        fast = speak.reading_seconds(self.blocks(100), 0, rate=360)
+        self.assertAlmostEqual(slow / fast, 2.0, places=6)
+
+    def test_the_announcement_of_a_code_block_is_counted(self):
+        # A code block is not read out, but its announcement is spoken, and
+        # a document full of them would be badly underestimated without it.
+        blocks = parse.parse("```python\nx = 1\n```\n")
+        self.assertGreater(speak.reading_seconds(blocks, 0, rate=220), 0)
+
+    def test_it_reads_as_a_person_would_say_it(self):
+        self.assertEqual(speak.how_long(0), "less than a minute")
+        self.assertEqual(speak.how_long(20), "less than a minute")
+        self.assertEqual(speak.how_long(60), "about 1 min")
+        self.assertEqual(speak.how_long(14 * 60), "about 14 min")
+        self.assertEqual(speak.how_long(59.4 * 60), "about 59 min")
+        self.assertEqual(speak.how_long(60 * 60), "about 1 h 00 min")
+        self.assertEqual(speak.how_long(95 * 60), "about 1 h 35 min")
+
+    def test_it_never_says_about_zero_minutes(self):
+        # Rounding a 20 second read down would print "about 0 min", which
+        # reads as a bug.
+        for seconds in range(0, 60, 5):
+            self.assertNotIn("0 min", speak.how_long(seconds))
+
+
+class EstimateMatchesRealSpeechTest(unittest.TestCase):
+    """The estimate against `say` itself, measured once and written down.
+
+    Synthesising these takes about four minutes, far too slow for every run,
+    so the measurements live here as numbers. They came from one real
+    document, 845 words in 82 sentences, timed with `say -o` and `afinfo`.
+    This does not re-measure `say`. It fails when the formula drifts away
+    from what `say` was doing when it was last measured.
+    """
+
+    WORDS = 845
+    MEASURED = {180: 282.0, 220: 245.0, 300: 186.0}   # seconds
+
+    def test_every_rate_lands_within_a_tenth_of_the_real_thing(self):
+        blocks = [parse.Block(kind="prose", line=1, lang="en",
+                              sentences=["word"] * self.WORDS)]
+        for rate, real in self.MEASURED.items():
+            with self.subTest(rate=rate):
+                guess = speak.reading_seconds(blocks, 0, rate)
+                off = abs(guess - real) / real
+                self.assertLess(off, 0.10,
+                                f"r{rate}: guessed {guess:.0f}s against a "
+                                f"measured {real:.0f}s, {off:.0%} out")
 
 
 class PlayTest(FakeSayTestCase):
@@ -194,7 +288,7 @@ class KeyTest(FakeSayTestCase):
         # played, paused, played again: the same sentence twice
         voice = speak.best_voice("en")
         self.assertEqual(self.calls(),
-                         [f"-v {voice} -r 220 Only one here."] * 2)
+                         [f"-v {voice} -r 220 -- Only one here."] * 2)
 
     def test_q_stops_before_the_rest(self):
         speak.play(BLOCKS, interactive=True, keys=FakeKeys("q"))
@@ -373,6 +467,16 @@ The second part starts here.
 """
 
 
+def playing(rate: int) -> str:
+    """The bit of the status line that says the rate, and only that line.
+
+    Three spaces, on purpose. The estimate printed before the reading starts
+    ends in "at r220" with one space, so waiting for a bare "r220" matches it
+    and the test presses its key before a single word has been spoken.
+    """
+    return f"   r{rate}"
+
+
 class RealTerminalTest(FakeSayTestCase):
     """The keys, pressed on a pty instead of handed over as a list.
 
@@ -438,22 +542,22 @@ class RealTerminalTest(FakeSayTestCase):
         # Taking only one of each pair means holding shift breaks the speed.
         for key, expected in (("=", 240), ("_", 200)):
             with self.subTest(key=key):
-                progress = self.drive([("r220", key), (f"r{expected}", "q")])
+                progress = self.drive([(playing(220), key), (playing(expected), "q")])
                 self.assertEqual(progress["rate"], expected)
 
     def test_minus_lowers_the_rate_from_a_real_terminal(self):
-        progress = self.drive([("r220", "-"), ("r200", "q")])
+        progress = self.drive([(playing(220), "-"), (playing(200), "q")])
         self.assertEqual(progress["rate"], 200)
 
     def test_plus_raises_the_rate_from_a_real_terminal(self):
-        progress = self.drive([("r220", "+"), ("r240", "q")])
+        progress = self.drive([(playing(220), "+"), (playing(240), "q")])
         self.assertEqual(progress["rate"], 240)
 
     def test_space_pauses_and_plays_again_from_a_real_terminal(self):
-        self.drive([("r220", " "), ("\u23f8", " "), ("\u25b6", "q")])
+        self.drive([(playing(220), " "), ("\u23f8", " "), ("\u25b6", "q")])
 
     def test_next_and_back_move_between_headings_from_a_real_terminal(self):
-        self.drive([("r220", "n"), ("# Two", "b"), ("# One", "q")])
+        self.drive([(playing(220), "n"), ("# Two", "b"), ("# One", "q")])
         # Reaching the second heading proves nothing on its own: the reader
         # gets there anyway once it runs out of sentences. The jump is what
         # skipped them, so the last one must never have been spoken.
