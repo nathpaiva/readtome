@@ -6,6 +6,23 @@ It cleans the markdown first, so code blocks and tables do not turn into noise.
 It picks the voice from the language of each section. While it plays, one key
 pauses, jumps or changes the speed.
 
+## Why I made this
+
+I don't know about you, but working with AI has me reading a LOT more than I
+used to. My eyes are tired and my head is tired.
+
+BTW, if you don't know me: I only really learned to read after I turned 7, and
+it was my mum, with a lot of patience, who got me there. I have ADHD, the real
+kind with a diagnosis and everything, and reading is one of the parts it hits
+hardest.
+
+So that is what readtome is for. Claude Code writes the spec, the plan and the
+design doc, and then I have to read all of it to know if it understood what I
+asked for. Now I listen to it instead.
+
+It only runs on macOS today. Feel free to contribute and change whatever you
+need for the way you work.
+
 ## Install
 
 ```
