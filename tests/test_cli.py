@@ -444,6 +444,30 @@ class RepoTest(unittest.TestCase):
         # bit set would fail only at first run.
         self.assertTrue(os.access(self.repo / "cli.py", os.X_OK))
 
+    def test_the_help_names_every_key_the_readme_lists(self):
+        # The arrow keys shipped without reaching the help text, and the user
+        # found that, not a test. The README table is the list she keeps, so
+        # the help is checked against it instead of a second list written here.
+        rows = []
+        inside = False
+        for line in (self.repo / "README.md").read_text().splitlines():
+            if line.startswith("## Keys while it plays"):
+                inside = True
+            elif inside and line.startswith("## "):
+                break
+            elif inside and line.startswith("|"):
+                rows.append(line)
+
+        keys = []
+        for row in rows[2:]:                      # past the header and its rule
+            cell = row.split("|")[1].strip().replace("`", "")
+            keys.extend(part.strip() for part in cell.split("/"))
+        self.assertGreater(len(keys), 5, "the key table was not found")
+
+        epilog = cli.build_parser().epilog
+        for key in keys:
+            self.assertIn(key, epilog, f"the help never mentions {key!r}")
+
     def test_the_readme_documents_every_flag(self):
         # Compared against the parser, not a list written by hand, so a flag
         # added later turns this red. And the flag has to sit in a TABLE ROW,
