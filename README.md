@@ -115,14 +115,13 @@ ships with, and both are a free download: System Settings, Accessibility,
 Spoken Content, System Speech Voice, Manage Voices. Nothing is required. A
 machine with none of them reads with plain Samantha.
 
-readtome asks `say` which voices are installed and takes the best one it wants.
-Nothing breaks on a machine without the download. `say -v '?'` lists every name
-you can pass.
+It asks `say` what is installed before it picks, so it never names a voice you
+do not have. `say -v '?'` lists them all.
 
-To keep your own voices, set them once:
+To use your own instead, set them once:
 
 ```
-export READTOME_VOICE_EN="Ava (Premium)"
+export READTOME_VOICE_EN="Zoe (Premium)"
 export READTOME_VOICE_PT="Luciana"
 ```
 
