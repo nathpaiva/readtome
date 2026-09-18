@@ -1,0 +1,19 @@
+name: tests
+
+# macOS only. The tests run the real `say`, open real ptys and press real
+# keys, so a Linux runner cannot tell the truth about any of it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run the tests
+        run: python3 -m unittest discover -s tests -t . -v
