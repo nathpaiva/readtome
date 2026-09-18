@@ -27,8 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="readtome",
         description="Read a markdown file out loud with macOS say.",
-        epilog="Keys while playing: space pauses, n and b jump between "
-               "headings, + and - change the speed, q quits.")
+        epilog="Keys while playing: space pauses, \u2193 and \u2191 move one "
+               "sentence, n and b jump between headings, + and - (or = and _) "
+               "change the speed, q quits.")
     p.add_argument("file", nargs="?", help="a markdown file. Beats every other flag.")
     p.add_argument("-p", "--project", help="repo name or path")
     p.add_argument("-b", "--branch", help="branch to read from")
