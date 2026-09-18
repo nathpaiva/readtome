@@ -130,11 +130,17 @@ number.
 | Key | What it does |
 |---|---|
 | space | pause, then play again from the top of that sentence |
+| ↓ | the next sentence |
+| ↑ | the sentence before |
 | `n` | jump to the next heading |
 | `b` | jump to the previous heading |
 | `+` / `-` | change the speed by 20 words per minute |
 | `=` / `_` | the same, for when shift is held or not |
 | `q` | quit, saving the position |
+
+↑ at the first sentence of a paragraph goes to the **last** sentence of the
+one before, so ↑ undoes ↓. At the very start of the file ↑ does nothing, rather
+than dropping you out of the reading.
 
 While it is paused only space and `q` do anything. The other keys wait until it
 is playing again.
