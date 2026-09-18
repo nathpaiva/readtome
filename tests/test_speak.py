@@ -1,0 +1,482 @@
+"""Tests for readtome/speak.py.
+
+A fake `say` goes on the PATH. It writes its arguments to a file and exits, so
+a test run is silent and fast.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import pty
+import re
+import select
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import parse   # noqa: E402
+import speak   # noqa: E402
+
+
+class FakeSayTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = self.root / "say.log"
+        # The voices this machine pretends to have. A test can rewrite it.
+        self.voices = self.root / "voices.txt"
+        self.set_voices("Samantha", "Samantha (Enhanced)", "Luciana")
+
+        fake = self.root / "say"
+        fake.write_text(
+            "#!/bin/sh\n"
+            # `say -v ?` lists the voices, and readtome reads that list to
+            # decide which one it can use. A fake that ignored it would make
+            # every voice test prove nothing.
+            f'if [ "$1" = "-v" ] && [ "$2" = "?" ]; then cat "{self.voices}"; exit 0; fi\n'
+            f'printf "%s\\n" "$*" >> "{self.log}"\n'
+            # Real `say` takes seconds. Exiting at once would end the key loop
+            # before it polls, and every key test would race.
+            "sleep 0.2\n"
+        )
+        fake.chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.root}{os.pathsep}{self.old_path}"
+        # The first spawn in a fresh process pays a cold start. Measured on a
+        # Mac: 300ms cold against 8ms warm. No sensible key timeout covers
+        # that, so the kill would win the race and the fake would never write
+        # its first line. One throwaway call pays the cost once.
+        subprocess.run(["say", "warm up"], capture_output=True)
+        self.log.unlink(missing_ok=True)
+
+    def set_voices(self, *names):
+        """Write the voice list in the shape `say -v ?` prints it."""
+        locale = {"Luciana": "pt_BR"}
+        self.voices.write_text("".join(
+            f"{name:<19} {locale.get(name, 'en_US')}    # Hello.\n"
+            for name in names))
+        # The lookup is cached for the run, so a new list needs a clean slate.
+        speak.installed_voices.cache_clear()
+        speak.best_voice.cache_clear()
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        speak.installed_voices.cache_clear()
+        speak.best_voice.cache_clear()
+        self.tmp.cleanup()
+
+    def calls(self):
+        if not self.log.exists():
+            return []
+        return [line for line in self.log.read_text().splitlines() if line]
+
+    def spoken(self):
+        """Just the text of each call, with the flags cut off.
+
+        Cut at the rate, not at a count of spaces. A voice name can hold a
+        space, and `Samantha (Enhanced)` does.
+        """
+        return [re.sub(r"^.*?-r \d+ ", "", line) for line in self.calls()]
+
+
+BLOCKS = [
+    parse.Block(kind="heading", line=5, lang="en", sentences=["Data flow"], level=2),
+    parse.Block(kind="prose", line=7, lang="en", sentences=["First one.", "Second one."]),
+    parse.Block(kind="prose", line=9, lang="pt", sentences=["Terceira frase."]),
+]
+
+
+class BestVoiceTest(FakeSayTestCase):
+    """Which voice readtome asks for, and what happens when it is missing."""
+
+    def test_the_enhanced_voice_wins_when_it_is_installed(self):
+        self.assertEqual(speak.best_voice("en"), "Samantha (Enhanced)")
+
+    def test_the_plain_voice_is_used_when_the_enhanced_one_is_missing(self):
+        # Enhanced voices are a download. Someone cloning this repo has the
+        # plain one and must not meet an error about a voice they never saw.
+        self.set_voices("Samantha", "Luciana")
+        self.assertEqual(speak.best_voice("en"), "Samantha")
+
+    def test_a_name_filling_its_whole_column_is_still_read(self):
+        # `Samantha (Enhanced)` is exactly as wide as the name column, so only
+        # one space separates it from the locale. Splitting on runs of spaces
+        # loses it, and the enhanced voice would look uninstalled on a machine
+        # that has it.
+        self.assertIn("Samantha (Enhanced)", speak.installed_voices())
+
+    def test_an_unknown_language_falls_back_to_english(self):
+        self.assertEqual(speak.best_voice("de"), speak.best_voice("en"))
+
+    def test_with_nothing_installed_it_asks_for_the_plain_name(self):
+        # `say` then fails naming the voice it could not find, which is a
+        # better error than us quietly picking a stranger's voice.
+        self.set_voices()
+        self.assertEqual(speak.best_voice("en"), "Samantha")
+
+    def test_a_forced_voice_never_reads_the_list(self):
+        self.set_voices()      # an empty list would break any lookup
+        block = parse.Block(kind="prose", line=1, lang="en", sentences=["Hi."])
+        self.assertEqual(speak.voice_for(block, "Albert"), "Albert")
+
+
+class PlayTest(FakeSayTestCase):
+    def test_one_say_call_per_sentence(self):
+        speak.play(BLOCKS, interactive=False)
+        self.assertEqual(len(self.calls()), 4)
+
+    def test_the_rate_is_passed_through(self):
+        speak.play(BLOCKS, rate=260, interactive=False)
+        self.assertTrue(all("-r 260" in c for c in self.calls()))
+
+    def test_the_voice_follows_the_block_language(self):
+        speak.play(BLOCKS, interactive=False)
+        self.assertIn(speak.best_voice("en"), self.calls()[0])
+        self.assertIn(speak.best_voice("pt"), self.calls()[3])
+
+    def test_a_forced_voice_wins_over_detection(self):
+        speak.play(BLOCKS, voice="Albert", interactive=False)
+        self.assertTrue(all("Albert" in c for c in self.calls()))
+
+    def test_start_skips_the_blocks_before_it(self):
+        speak.play(BLOCKS, start=2, interactive=False)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_it_returns_the_last_block_it_started(self):
+        self.assertEqual(speak.play(BLOCKS, interactive=False), 2)
+
+
+class DescribeTest(unittest.TestCase):
+    def test_a_heading_shows_its_level_and_line(self):
+        line = speak.describe(BLOCKS[0])
+        self.assertIn("##", line)
+        self.assertIn("5", line)
+        self.assertIn("Data flow", line)
+
+    def test_prose_prints_nothing(self):
+        self.assertIsNone(speak.describe(BLOCKS[1]))
+
+    def test_a_code_block_prints_its_line(self):
+        block = parse.Block(kind="code", line=28, sentences=["code block, typescript"])
+        self.assertIn("28", speak.describe(block))
+
+
+class FakeKeys:
+    """Hands out one key per call, then None for ever.
+
+    It sleeps the timeout it is given, the way the real reader does. Without
+    that wait the key lands microseconds after `say` starts, the kill wins the
+    race, and the fake never reaches its own first line. Measured on a Mac: a
+    warm spawn writes after about 8ms, 16ms at worst, so the 50ms poll timeout
+    leaves room to spare.
+    """
+
+    def __init__(self, *keys):
+        self.pending = list(keys)
+
+    def __call__(self, timeout):
+        time.sleep(timeout)
+        return self.pending.pop(0) if self.pending else None
+
+
+class KeyTest(FakeSayTestCase):
+    def test_space_pauses_then_replays_the_same_sentence(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, interactive=True, keys=FakeKeys(" ", " "))
+        # played, paused, played again: the same sentence twice
+        voice = speak.best_voice("en")
+        self.assertEqual(self.calls(),
+                         [f"-v {voice} -r 220 Only one here."] * 2)
+
+    def test_q_stops_before_the_rest(self):
+        speak.play(BLOCKS, interactive=True, keys=FakeKeys("q"))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_n_jumps_to_the_next_heading(self):
+        blocks = [
+            parse.Block(kind="heading", line=1, sentences=["One"], level=1),
+            parse.Block(kind="prose", line=2, sentences=["Skip this one."]),
+            parse.Block(kind="heading", line=3, sentences=["Two"], level=1),
+        ]
+        speak.play(blocks, interactive=True, keys=FakeKeys(None, "n"))
+        spoken = " ".join(self.calls())
+        self.assertIn("One", spoken)
+        self.assertIn("Two", spoken)
+        self.assertNotIn("Skip this one", spoken)
+
+    def test_plus_raises_the_rate_and_replays(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, rate=220, interactive=True, keys=FakeKeys("+"))
+        self.assertIn("-r 240", self.calls()[-1])
+
+    def test_the_rate_stops_at_the_ceiling(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, rate=speak.RATE_MAX, interactive=True, keys=FakeKeys("+"))
+        self.assertIn(f"-r {speak.RATE_MAX}", self.calls()[-1])
+
+    def test_an_unknown_key_is_ignored(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, interactive=True, keys=FakeKeys("z"))
+        self.assertEqual(len(self.calls()), 1)
+
+
+    def test_a_pause_resumes_when_the_test_keys_run_dry(self):
+        # A test reader hands over a fixed list. When it empties during a
+        # pause the loop has to give up waiting, or the suite hangs. This is
+        # the branch _waiting_forever exists for.
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, interactive=True, keys=FakeKeys(" "))
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_q_while_paused_quits(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, interactive=True, keys=FakeKeys(" ", "q"))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_minus_lowers_the_rate_and_replays(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, rate=220, interactive=True, keys=FakeKeys("-"))
+        self.assertIn("-r 200", self.calls()[-1])
+
+    def test_the_rate_stops_at_the_floor(self):
+        one = [parse.Block(kind="prose", line=1, sentences=["Only one here."])]
+        speak.play(one, rate=speak.RATE_MIN, interactive=True, keys=FakeKeys("-"))
+        self.assertIn(f"-r {speak.RATE_MIN}", self.calls()[-1])
+
+    def test_b_jumps_back_to_the_previous_heading(self):
+        # start=1 on purpose. A sentence lasts about 200ms and a key poll
+        # takes 50ms, so starting at the top would fire "b" while still on the
+        # first block, where there is nothing to go back to.
+        blocks = [
+            parse.Block(kind="heading", line=1, sentences=["One"], level=1),
+            parse.Block(kind="heading", line=3, sentences=["Two"], level=1),
+        ]
+        speak.play(blocks, start=1, interactive=True, keys=FakeKeys("b", "q"))
+        self.assertEqual(self.spoken(), ["Two", "One"])
+
+
+class NoRealSayTest(unittest.TestCase):
+    """Nothing in this suite may reach the real macOS `say`.
+
+    A test that escapes the fake makes the machine speak on every run. It
+    does not fail, and no assertion sees it, so the only thing that catches
+    it is a person in the room. This walks the test files and checks that
+    every class reaching speak.play sits on a fixture that puts a fake `say`
+    on the PATH.
+
+    It searches the text, not the call graph, so a class that only names
+    speak.play in a comment counts as reaching it. That is the safe way round:
+    a false alarm costs a moment, a miss costs a machine that talks to itself.
+    This class is the one exception, because it has to name the thing it looks
+    for.
+    """
+
+    FAKES = {"FakeSayTestCase", "CliTestCase"}
+
+    def test_every_class_that_speaks_uses_the_fake(self):
+        import ast
+
+        folder = Path(__file__).resolve().parent
+        for path in sorted(folder.glob("test_*.py")):
+            source = path.read_text()
+            for node in ast.parse(source).body:
+                if not isinstance(node, ast.ClassDef) or node.name in self.FAKES:
+                    continue
+                if node.name == type(self).__name__:
+                    continue      # this class names speak.play in its own text
+                body = ast.get_source_segment(source, node) or ""
+                if "speak.play" not in body:
+                    continue
+                bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
+                self.assertTrue(
+                    self.FAKES.intersection(bases),
+                    f"{path.name}:{node.name} reaches speak.play with no fake say")
+
+
+class WaitingForeverTest(unittest.TestCase):
+    def test_it_tells_the_two_readers_apart(self):
+        # The whole point: a real pause waits with no time limit, a test
+        # reader that has run dry must not leave the loop spinning. Pin it to
+        # a bare assertion, so forcing it to either answer fails here first.
+        self.assertTrue(speak._waiting_forever(speak.read_key))
+        self.assertFalse(speak._waiting_forever(FakeKeys()))
+
+
+class StatusLineTest(unittest.TestCase):
+    def test_it_shows_the_line_the_count_and_the_rate(self):
+        line = speak.status_line(BLOCKS[1], index=0, total=2, rate=260, paused=False)
+        self.assertIn("7", line)
+        self.assertIn("1/2", line)
+        self.assertIn("260", line)
+
+    def test_paused_is_visible(self):
+        line = speak.status_line(BLOCKS[1], index=0, total=2, rate=220, paused=True)
+        self.assertIn("⏸", line)
+
+
+class TerminalRestoreTest(unittest.TestCase):
+    def test_the_terminal_goes_back_after_a_crash(self):
+        import pty
+        import termios
+
+        def flags(fd):
+            # A pty nobody has read carries the PENDIN bit, which the kernel
+            # sets on its own. Compare without it, or this measures a kernel
+            # artefact instead of what cbreak did.
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~termios.PENDIN
+            return attrs
+
+        leader, follower = pty.openpty()
+        self.addCleanup(os.close, leader)
+        self.addCleanup(os.close, follower)
+        before = flags(follower)
+
+        stream = os.fdopen(follower, "w", closefd=False)
+        with self.assertRaises(ValueError):
+            with speak.cbreak(stream):
+                raise ValueError("boom")
+
+        self.assertEqual(flags(follower), before)
+
+
+REPO = str(Path(__file__).resolve().parents[1])
+
+# The child runs the real `play` with no injected reader, so it detects the
+# terminal itself and reads keys through `read_key`.
+CHILD = """
+import json, sys
+sys.path.insert(0, {repo!r})
+import parse, speak
+blocks = parse.parse(open({doc!r}).read())
+progress = {{}}
+speak.play(blocks, rate=220, progress=progress)
+open({out!r}, "w").write(json.dumps(progress))
+"""
+
+DOC = """# One
+
+One here. Two here. Three here. Four here. Five here. Six here.
+Seven here. Eight here. Nine here. Ten here. Eleven here. Twelve here.
+
+# Two
+
+The second part starts here.
+"""
+
+
+class RealTerminalTest(FakeSayTestCase):
+    """The keys, pressed on a pty instead of handed over as a list.
+
+    Every other key test injects a reader, so it proves the decision and not
+    the device. These write bytes into a terminal and read the screen back.
+    """
+
+    def drive(self, steps, timeout=25.0):
+        """Wait for each line on screen, then type its key. Returns progress.
+
+        `steps` is a list of (text to wait for, key to press). Waiting on the
+        screen instead of sleeping keeps the test off the clock.
+        """
+        doc = self.root / "doc.md"
+        doc.write_text(DOC)
+        out = self.root / "progress.json"
+        source = CHILD.format(repo=REPO, doc=str(doc), out=str(out))
+
+        leader, follower = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", source], stdin=follower,
+                                stdout=follower, stderr=follower)
+        os.close(follower)
+        self.addCleanup(proc.kill)
+        self.addCleanup(os.close, leader)
+
+        seen = ""
+        deadline = time.time() + timeout
+        for expect, key in steps:
+            while expect not in seen:
+                self.assertLess(time.time(), deadline,
+                                f"never saw {expect!r} on screen. Got: {seen!r}")
+                ready, _, _ = select.select([leader], [], [], 0.2)
+                if not ready:
+                    continue
+                try:
+                    data = os.read(leader, 4096)
+                except OSError:   # the child closed the pty
+                    break
+                if not data:
+                    break
+                seen += data.decode("utf-8", "replace")
+            self.assertIn(expect, seen, f"never saw {expect!r} on screen")
+            # Only look forward, so the next wait cannot match an old line.
+            seen = seen.split(expect, 1)[1]
+            os.write(leader, key.encode())
+
+        # Keep reading to the end. A pty whose buffer fills blocks the child
+        # on its next write, and the exit we are waiting for never comes.
+        while proc.poll() is None:
+            self.assertLess(time.time(), deadline, "the child never exited")
+            ready, _, _ = select.select([leader], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                os.read(leader, 4096)
+            except OSError:
+                break
+        proc.wait(timeout=5)
+        return json.loads(out.read_text())
+
+    def test_the_shifted_twins_change_the_speed_too(self):
+        # `+` is shift and `=` on one key, `_` is shift and `-` on another.
+        # Taking only one of each pair means holding shift breaks the speed.
+        for key, expected in (("=", 240), ("_", 200)):
+            with self.subTest(key=key):
+                progress = self.drive([("r220", key), (f"r{expected}", "q")])
+                self.assertEqual(progress["rate"], expected)
+
+    def test_minus_lowers_the_rate_from_a_real_terminal(self):
+        progress = self.drive([("r220", "-"), ("r200", "q")])
+        self.assertEqual(progress["rate"], 200)
+
+    def test_plus_raises_the_rate_from_a_real_terminal(self):
+        progress = self.drive([("r220", "+"), ("r240", "q")])
+        self.assertEqual(progress["rate"], 240)
+
+    def test_space_pauses_and_plays_again_from_a_real_terminal(self):
+        self.drive([("r220", " "), ("\u23f8", " "), ("\u25b6", "q")])
+
+    def test_next_and_back_move_between_headings_from_a_real_terminal(self):
+        self.drive([("r220", "n"), ("# Two", "b"), ("# One", "q")])
+        # Reaching the second heading proves nothing on its own: the reader
+        # gets there anyway once it runs out of sentences. The jump is what
+        # skipped them, so the last one must never have been spoken.
+        self.assertFalse([c for c in self.calls() if "Twelve here." in c],
+                         "the reader never jumped, it just read to the end")
+
+
+class NotATerminalTest(FakeSayTestCase):
+    """The silent fallback that hid the `-` key bug for a whole session."""
+
+    def test_it_warns_when_it_works_out_that_this_is_not_a_terminal(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            speak.play(BLOCKS[:1], stream=io.StringIO())
+        self.assertIn("not a terminal", error.getvalue())
+        self.assertIn("Ctrl+C", error.getvalue())
+
+    def test_it_stays_quiet_when_the_caller_picked_the_mode(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            speak.play(BLOCKS[:1], interactive=False, stream=io.StringIO())
+        self.assertEqual(error.getvalue(), "")
+
+
+if __name__ == "__main__":
+    unittest.main()
