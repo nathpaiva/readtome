@@ -101,7 +101,11 @@ _RUNNING: list[subprocess.Popen] = []
 
 
 def start_say(sentence: str, voice: str, rate: int) -> subprocess.Popen:
-    proc = subprocess.Popen(["say", "-v", voice, "-r", str(rate), sentence])
+    # `--` closes the options. Without it a sentence starting with a dash,
+    # which any document about flags has, is read as an option: `say` prints
+    # "unrecognized option", exits, and the sentence is silently skipped.
+    proc = subprocess.Popen(["say", "-v", voice, "-r", str(rate), "--",
+                             sentence])
     _RUNNING[:] = [p for p in _RUNNING if p.poll() is None]
     _RUNNING.append(proc)
     return proc
@@ -146,6 +150,33 @@ def cbreak(stream):
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
+# `say -r N` does not deliver N words a minute. Measured on a real document
+# with `say -o` and `afinfo`, the reading takes about 7% longer than words
+# divided by rate. The gap drifts a little with the rate: about 0% at r180,
+# 6% at r220 and 10% at r300, so one constant near the middle keeps every
+# rate inside 7%.
+SLOWER_THAN_IT_SAYS = 1.07
+
+
+def reading_seconds(blocks: list[Block], start: int, rate: int) -> float:
+    """Roughly how long the blocks from `start` take to read out loud."""
+    words = sum(len(sentence.split())
+                for block in blocks[start:]
+                for sentence in block.sentences)
+    return words / rate * 60 * SLOWER_THAN_IT_SAYS
+
+
+def how_long(seconds: float) -> str:
+    """The estimate as a person would say it. Always vague on purpose."""
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return "less than a minute"
+    if minutes < 60:
+        return f"about {minutes} min"
+    hours, rest = divmod(minutes, 60)
+    return f"about {hours} h {rest:02d} min"
+
+
 def status_line(block: Block, index: int, total: int, rate: int, paused: bool) -> str:
     mark = "⏸" if paused else "▶"
     return f" {mark} {block.line:>4}  sentence {index + 1}/{total}   r{rate}"
@@ -187,6 +218,11 @@ def play(blocks: list[Block], rate: int = 220, voice: str | None = None,
             # Say it out loud. Without this line the tool reads the whole file
             # with no keys and no way to stop, and looks like a broken `-` key.
             print(NOT_A_TERMINAL, file=sys.stderr, flush=True)
+
+    # Before the first word, so the length of what you are starting is known
+    # while you can still decide not to start it.
+    print(f"{how_long(reading_seconds(blocks, start, rate))} at r{rate}",
+          file=stream, flush=True)
     if not interactive:
         index = _play_straight(blocks, rate, voice, start, stream)
         if progress is not None:

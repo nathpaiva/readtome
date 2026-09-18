@@ -3,8 +3,9 @@
 Read a markdown file out loud, using the `say` command that ships with macOS.
 
 It cleans the markdown first, so code blocks and tables do not turn into noise.
-It picks the voice from the language of each section. While it plays, one key
-pauses, jumps or changes the speed.
+It picks the voice from the language of each section. It tells you how long the
+reading will take before the first word, so you know what you are starting.
+While it plays, one key pauses, jumps or changes the speed.
 
 ## Why I made this
 
@@ -65,6 +66,26 @@ readtome docs/spec.md --from "error handling" -r 260
 readtome docs/spec.md --from 41
 readtome docs/spec.md --resume
 ```
+
+## How long it takes
+
+Before the first word, readtome prints the length of what you are about to
+hear:
+
+```
+$ readtome docs/plans/some-plan.md
+about 14 min at r220
+→    1  # Some Plan
+ ▶    1  sentence 1/1   r220
+```
+
+It counts from where the reading starts, so `--from` shortens it. The rate is
+in the line because the number assumed that rate. Pressing `+` or `-` later
+changes the real length and does not redraw the estimate.
+
+`say -r 220` does not deliver 220 words a minute. It runs about 7% slower than
+that on real text, and readtome allows for it. Expect the number to be right
+within about a tenth.
 
 ## Flags
 
