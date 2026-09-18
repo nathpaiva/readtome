@@ -109,7 +109,7 @@ def hard_wrap(piece: str) -> list[str]:
 # System Settings, so a machine that never got them falls back to the plain
 # voice that ships with macOS.
 VOICES = {
-    "en": ("Samantha (Enhanced)", "Samantha"),
+    "en": ("Ava (Premium)", "Samantha (Enhanced)", "Samantha"),
     "pt": ("Luciana",),
 }
 

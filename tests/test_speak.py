@@ -157,6 +157,12 @@ class VoiceFromTheEnvironmentTest(FakeSayTestCase):
 class BestVoiceTest(FakeSayTestCase):
     """Which voice readtome asks for, and what happens when it is missing."""
 
+    def test_the_premium_voice_wins_over_the_enhanced_one(self):
+        # The order in VOICES is best first, so a machine with both takes the
+        # better one without anyone choosing.
+        self.set_voices("Samantha", "Samantha (Enhanced)", "Ava (Premium)")
+        self.assertEqual(speak.best_voice("en"), "Ava (Premium)")
+
     def test_the_enhanced_voice_wins_when_it_is_installed(self):
         self.assertEqual(speak.best_voice("en"), "Samantha (Enhanced)")
 

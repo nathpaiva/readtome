@@ -107,10 +107,13 @@ rewind to the top.
 
 ## Voices
 
-English uses **Samantha (Enhanced)** when you have it, and plain **Samantha**
-when you do not. Portuguese uses **Luciana**. The enhanced voices sound less
-robotic and are a free download: System Settings, Accessibility, Spoken
-Content, System Speech Voice, Manage Voices.
+English takes the best voice you have, in this order: **Ava (Premium)**, then
+**Samantha (Enhanced)**, then plain **Samantha**. Portuguese uses **Luciana**.
+
+Premium and Enhanced sound far less robotic than the compact voices macOS
+ships with, and both are a free download: System Settings, Accessibility,
+Spoken Content, System Speech Voice, Manage Voices. Nothing is required. A
+machine with none of them reads with plain Samantha.
 
 readtome asks `say` which voices are installed and takes the best one it wants.
 Nothing breaks on a machine without the download. `say -v '?'` lists every name
