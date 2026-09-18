@@ -1,0 +1,60 @@
+name: release
+
+# A pushed version tag updates the formula in the tap, so `brew upgrade` sees
+# the new version without anyone editing a sha256 by hand.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  bump-the-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out the tarball and its sha256
+        id: tarball
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          # Fail loudly. A formula whose sha does not match its url only
+          # breaks later, on someone else machine, at install time.
+          curl -fsSL "$url" -o tarball.tar.gz
+          sha="$(sha256sum tarball.tar.gz | cut -d' ' -f1)"
+          {
+            echo "tag=$tag"
+            echo "url=$url"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: nathpaiva/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Point the formula at the new tag
+        run: |
+          set -euo pipefail
+          f=tap/Formula/readtome.rb
+          # Rewrite the two lines, then read them back. `sed` is happy to
+          # match nothing, and a silent no-op would leave the old version
+          # published with a green tick next to it.
+          sed -i -E "s|^  url \".*\"|  url \"${{ steps.tarball.outputs.url }}\"|" "$f"
+          sed -i -E "s|^  sha256 \".*\"|  sha256 \"${{ steps.tarball.outputs.sha }}\"|" "$f"
+          grep -q "${{ steps.tarball.outputs.url }}" "$f" || { echo "url did not change"; exit 1; }
+          grep -q "${{ steps.tarball.outputs.sha }}" "$f" || { echo "sha did not change"; exit 1; }
+          git -C tap diff --stat
+
+      - name: Push it
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/readtome.rb
+          git commit -m "feat: readtome ${{ steps.tarball.outputs.tag }}"
+          git push
