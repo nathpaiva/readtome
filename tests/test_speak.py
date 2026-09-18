@@ -400,7 +400,7 @@ class WaitingForeverTest(unittest.TestCase):
         # The whole point: a real pause waits with no time limit, a test
         # reader that has run dry must not leave the loop spinning. Pin it to
         # a bare assertion, so forcing it to either answer fails here first.
-        self.assertTrue(speak._waiting_forever(speak.read_key))
+        self.assertTrue(speak._waiting_forever(speak.KeyReader(fd=0)))
         self.assertFalse(speak._waiting_forever(FakeKeys()))
 
 
@@ -445,7 +445,7 @@ class TerminalRestoreTest(unittest.TestCase):
 REPO = str(Path(__file__).resolve().parents[1])
 
 # The child runs the real `play` with no injected reader, so it detects the
-# terminal itself and reads keys through `read_key`.
+# terminal itself and reads keys through `KeyReader`.
 CHILD = """
 import json, sys
 sys.path.insert(0, {repo!r})
@@ -455,6 +455,9 @@ progress = {{}}
 speak.play(blocks, rate=220, progress=progress)
 open({out!r}, "w").write(json.dumps(progress))
 """
+
+UP = "\x1b[A"
+DOWN = "\x1b[B"
 
 DOC = """# One
 
@@ -555,6 +558,35 @@ class RealTerminalTest(FakeSayTestCase):
 
     def test_space_pauses_and_plays_again_from_a_real_terminal(self):
         self.drive([(playing(220), " "), ("\u23f8", " "), ("\u25b6", "q")])
+
+    def test_the_down_arrow_moves_one_sentence_on(self):
+        # The prose block holds 6 sentences, so this stays inside one block.
+        self.drive([("sentence 1/6", DOWN),
+                    ("sentence 2/6", DOWN),
+                    ("sentence 3/6", "q")])
+
+    def test_the_up_arrow_undoes_the_down_arrow(self):
+        self.drive([("sentence 1/6", DOWN + DOWN),
+                    ("sentence 3/6", UP),
+                    ("sentence 2/6", "q")])
+
+    def test_the_down_arrow_crosses_into_the_next_block(self):
+        # The heading is one sentence long, so down leaves it at once.
+        self.drive([("sentence 1/1   r220", DOWN),
+                    ("sentence 1/6", "q")])
+
+    def test_the_up_arrow_lands_on_the_last_sentence_of_the_block_before(self):
+        # Sentence 6 of 6, not 1 of 6. Landing on the first would make up and
+        # down disagree, and a document would never come back the same way.
+        self.drive([("sentence 1/6", DOWN * 6),
+                    ("# Two", UP),
+                    ("sentence 6/6", "q")])
+
+    def test_the_up_arrow_at_the_very_start_stays_put(self):
+        # One press too many must not drop out of the reading.
+        progress = self.drive([("sentence 1/1   r220", UP + UP),
+                               ("sentence 1/1   r220", "q")])
+        self.assertEqual(progress["block"], 0)
 
     def test_next_and_back_move_between_headings_from_a_real_terminal(self):
         self.drive([(playing(220), "n"), ("# Two", "b"), ("# One", "q")])

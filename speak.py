@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import functools
+import os
 import re
 import select
 import shutil
@@ -119,10 +120,68 @@ def _stop_everything() -> None:
             proc.kill()
 
 
-def read_key(timeout: float) -> str | None:
-    """One key, or None when the timeout runs out. Never blocks for long."""
-    ready, _, _ = select.select([sys.stdin], [], [], timeout)
-    return sys.stdin.read(1) if ready else None
+ESCAPE = b"\x1b"
+
+# What the arrow keys send. Three bytes, not one.
+ARROWS = {b"A": "up", b"B": "down", b"C": "right", b"D": "left"}
+
+
+class KeyReader:
+    """One key press, read straight from the terminal file descriptor.
+
+    Not `sys.stdin.read(1)`. That decodes a whole chunk into a Python buffer,
+    so the `[A` of an arrow key would sit there unseen while `select` reported
+    the terminal as empty, and every arrow would arrive as a bare escape.
+    """
+
+    def __init__(self, fd: int | None = None):
+        self.fd = sys.stdin.fileno() if fd is None else fd
+        self.pending = b""
+
+    def _fill(self, timeout: float | None) -> bool:
+        if self.pending:
+            return True
+        ready, _, _ = select.select([self.fd], [], [], timeout)
+        if not ready:
+            return False
+        chunk = os.read(self.fd, 64)
+        if not chunk:
+            return False
+        self.pending += chunk
+        return True
+
+    def _take(self, count: int) -> bytes:
+        taken, self.pending = self.pending[:count], self.pending[count:]
+        return taken
+
+    def __call__(self, timeout: float | None = None) -> str | None:
+        """A key, or None when the timeout runs out. Arrows come back named."""
+        if not self._fill(timeout):
+            return None
+        if not self.pending.startswith(ESCAPE):
+            return self._take(_utf8_length(self.pending[0])).decode(
+                "utf-8", "replace")
+
+        self._take(1)
+        # A bare escape arrives alone. An arrow sends its `[A` in the same
+        # breath, so a short wait tells the two apart.
+        if not self._fill(0.05) or not self.pending.startswith(b"["):
+            return "escape"
+        self._take(1)
+        if not self._fill(0.05):
+            return "escape"
+        return ARROWS.get(self._take(1), "")
+
+
+def _utf8_length(first: int) -> int:
+    """How many bytes the character starting with this one takes."""
+    if first < 0x80:
+        return 1
+    if first < 0xE0:
+        return 2
+    if first < 0xF0:
+        return 3
+    return 4
 
 
 @contextlib.contextmanager
@@ -230,7 +289,7 @@ def play(blocks: list[Block], rate: int = 220, voice: str | None = None,
         return index
     with cbreak(sys.stdin):
         return _play_keys(blocks, rate, voice, start, stream,
-                          keys or read_key, progress)
+                          keys or KeyReader(), progress)
 
 
 def _play_straight(blocks, rate, voice, start, stream) -> int:
@@ -247,6 +306,7 @@ def _play_straight(blocks, rate, voice, start, stream) -> int:
 
 def _play_keys(blocks, rate, voice, start, stream, keys, progress=None) -> int:
     index = start
+    enter_at = 0      # which sentence the next block opens on
     while 0 <= index < len(blocks):
         block = blocks[index]
         line = describe(block)
@@ -255,8 +315,9 @@ def _play_keys(blocks, rate, voice, start, stream, keys, progress=None) -> int:
             stream.flush()
 
         jump = None
-        sentence_at = 0
-        while sentence_at < len(block.sentences):
+        sentence_at = enter_at
+        enter_at = 0
+        while 0 <= sentence_at < len(block.sentences):
             action, rate = _one_sentence(block, sentence_at, rate, voice,
                                          stream, keys)
             if action == "repeat":
@@ -272,9 +333,24 @@ def _play_keys(blocks, rate, voice, start, stream, keys, progress=None) -> int:
             if action == "back":
                 jump = _heading_before(blocks, index)
                 break
+            if action == "rewind":
+                sentence_at -= 1
+                continue
             sentence_at += 1
 
-        index = index + 1 if jump is None else jump
+        if jump is not None:
+            index = jump
+        elif sentence_at < 0:
+            if index == 0:
+                # Nothing before the first sentence of the file. Staying put
+                # beats dropping out of the reading on one key too many.
+                pass
+            else:
+                index -= 1
+                # The LAST sentence of the block before, so up undoes down.
+                enter_at = max(0, len(blocks[index].sentences) - 1)
+        else:
+            index += 1
 
     stream.write(CLEAR_LINE)
     index = max(start, len(blocks) - 1)
@@ -318,6 +394,14 @@ def _one_sentence(block, at, rate, voice, stream, keys):
             proc.kill()
             proc.wait()
             return "repeat", max(RATE_MIN, rate - RATE_STEP)
+        if key == "down":
+            proc.kill()
+            proc.wait()
+            return "done", rate
+        if key == "up":
+            proc.kill()
+            proc.wait()
+            return "rewind", rate
         if key == "n":
             proc.kill()
             proc.wait()
@@ -335,13 +419,13 @@ def _one_sentence(block, at, rate, voice, stream, keys):
 
 
 def _waiting_forever(keys) -> bool:
-    """True for the real reader, false for a test reader that has run dry.
+    """True for a real terminal reader, false for a test reader run dry.
 
     A real pause waits for the user with no time limit. A test hands over a
     fixed list of keys, and the loop must not spin once that list is empty.
 
-    This compares identity, not behaviour, so a caller that wrapped read_key
-    would be taken for a test reader. There is one call site and one real
-    reader today. A second real reader has to be named here too.
+    This asks what the reader IS, so wrapping one in a counter or a log keeps
+    it real. It used to compare identity with a module level function, which
+    a wrapper quietly broke.
     """
-    return keys is read_key
+    return isinstance(keys, KeyReader)
