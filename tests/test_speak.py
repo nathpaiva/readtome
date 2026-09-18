@@ -94,6 +94,66 @@ BLOCKS = [
 ]
 
 
+class VoiceFromTheEnvironmentTest(FakeSayTestCase):
+    """Pinning a voice without touching the code."""
+
+    def pin(self, lang, name):
+        variable = speak.voice_variable(lang)
+        old = os.environ.get(variable)
+        os.environ[variable] = name
+        self.addCleanup(lambda: os.environ.__setitem__(variable, old)
+                        if old is not None else os.environ.pop(variable, None))
+        speak.best_voice.cache_clear()
+
+    def test_the_variable_wins_over_the_built_in_choice(self):
+        self.set_voices("Samantha", "Samantha (Enhanced)", "Albert")
+        self.pin("en", "Albert")
+        self.assertEqual(speak.best_voice("en"), "Albert")
+
+    def test_each_language_has_its_own_variable(self):
+        self.set_voices("Samantha", "Luciana", "Albert")
+        self.pin("pt", "Albert")
+        self.assertEqual(speak.best_voice("pt"), "Albert")
+        self.assertEqual(speak.best_voice("en"), "Samantha",
+                         "pinning one language must not move the other")
+
+    def test_the_language_switch_still_works_when_a_voice_is_pinned(self):
+        # This is the whole point. `--voice` pins one voice and turns
+        # detection off; the variable pins one voice PER language, so a
+        # document that mixes the two still changes voice.
+        self.set_voices("Samantha", "Luciana", "Albert")
+        self.pin("en", "Albert")
+        speak.play(BLOCKS, interactive=False, stream=io.StringIO())
+        self.assertIn("Albert", self.calls()[0])
+        self.assertIn("Luciana", self.calls()[3])
+
+    def test_a_voice_that_is_not_installed_says_so(self):
+        # `say` takes an unknown voice, exits 0, and reads everything in the
+        # default voice. Without this check a typo costs a whole document in
+        # the wrong voice, with nothing on screen to explain it.
+        self.set_voices("Samantha", "Luciana")
+        self.pin("en", "Ava")
+        with self.assertRaises(RuntimeError) as caught:
+            speak.best_voice("en")
+        message = str(caught.exception)
+        self.assertIn("READTOME_VOICE_EN", message)
+        self.assertIn("Ava", message)
+        self.assertIn("say -v", message, "the message must say how to look")
+
+    def test_an_empty_variable_is_the_same_as_not_setting_it(self):
+        # An `export READTOME_VOICE_EN=` left over in a shell config must not
+        # turn into an error about a voice called nothing.
+        self.set_voices("Samantha", "Samantha (Enhanced)")
+        self.pin("en", "   ")
+        self.assertEqual(speak.best_voice("en"), "Samantha (Enhanced)")
+
+    def test_a_forced_voice_still_beats_the_variable(self):
+        self.set_voices("Samantha", "Albert")
+        self.pin("en", "Albert")
+        block = parse.Block(kind="prose", line=1, lang="en", sentences=["Hi."])
+        self.assertEqual(speak.voice_for(block, "Samantha"), "Samantha")
+
+
 class BestVoiceTest(FakeSayTestCase):
     """Which voice readtome asks for, and what happens when it is missing."""
 

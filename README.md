@@ -115,9 +115,23 @@ ships with, and both are a free download: System Settings, Accessibility,
 Spoken Content, System Speech Voice, Manage Voices. Nothing is required. A
 machine with none of them reads with plain Samantha.
 
-readtome asks `say` which voices are installed and takes the best one it wants.
-Nothing breaks on a machine without the download. `--voice <name>` overrides
-all of it, and `say -v '?'` lists every name you can pass.
+It asks `say` what is installed before it picks, so it never names a voice you
+do not have. `say -v '?'` lists them all.
+
+To use your own instead, set them once:
+
+```
+export READTOME_VOICE_EN="Zoe (Premium)"
+export READTOME_VOICE_PT="Luciana"
+```
+
+Each language keeps its own voice, so a document that mixes the two still
+changes voice as it reads. `--voice <name>` beats both and turns language
+detection off, which is what you want for one run and not for every run.
+
+A name that is not installed stops readtome with a message. `say` would take
+it, exit 0, and read the whole document in the default voice, which looks like
+the variable did nothing.
 
 ## Picking a branch or a file
 
