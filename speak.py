@@ -159,8 +159,10 @@ class KeyReader:
         if not self._fill(timeout):
             return None
         if not self.pending.startswith(ESCAPE):
-            return self._take(_utf8_length(self.pending[0])).decode(
-                "utf-8", "replace")
+            # One byte. No key readtome answers to is wider than that, and a
+            # stray half of an accented letter matches nothing and is ignored,
+            # which is what should happen to a key with no meaning here.
+            return self._take(1).decode("utf-8", "replace")
 
         self._take(1)
         # A bare escape arrives alone. An arrow sends its `[A` in the same
@@ -171,17 +173,6 @@ class KeyReader:
         if not self._fill(0.05):
             return "escape"
         return ARROWS.get(self._take(1), "")
-
-
-def _utf8_length(first: int) -> int:
-    """How many bytes the character starting with this one takes."""
-    if first < 0x80:
-        return 1
-    if first < 0xE0:
-        return 2
-    if first < 0xF0:
-        return 3
-    return 4
 
 
 @contextlib.contextmanager

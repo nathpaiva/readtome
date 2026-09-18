@@ -506,6 +506,7 @@ class RealTerminalTest(FakeSayTestCase):
         self.addCleanup(os.close, leader)
 
         seen = ""
+        self.screen = ""      # the whole transcript, never cut
         deadline = time.time() + timeout
         for expect, key in steps:
             while expect not in seen:
@@ -520,7 +521,9 @@ class RealTerminalTest(FakeSayTestCase):
                     break
                 if not data:
                     break
-                seen += data.decode("utf-8", "replace")
+                text = data.decode("utf-8", "replace")
+                seen += text
+                self.screen += text
             self.assertIn(expect, seen, f"never saw {expect!r} on screen")
             # Only look forward, so the next wait cannot match an old line.
             seen = seen.split(expect, 1)[1]
@@ -578,9 +581,21 @@ class RealTerminalTest(FakeSayTestCase):
     def test_the_up_arrow_lands_on_the_last_sentence_of_the_block_before(self):
         # Sentence 6 of 6, not 1 of 6. Landing on the first would make up and
         # down disagree, and a document would never come back the same way.
+        #
+        # Watching the screen is not enough here: landing on 1 of 6 reaches
+        # 6 of 6 on its own a few seconds later, and the test would pass for
+        # the wrong reason. What `say` was actually handed is the proof.
         self.drive([("sentence 1/6", DOWN * 6),
                     ("# Two", UP),
                     ("sentence 6/6", "q")])
+        # Which sentence came FIRST after the jump. Landing on 1 of 6 also
+        # reaches 6 of 6 a second later, on its own, so only the order proves
+        # anything. The `say` log cannot: six arrows arrive at once and each
+        # process is killed before it manages to write its line.
+        after = self.screen.split("# Two", 1)[1]
+        landed = re.search(r"sentence (\d)/6", after).group(1)
+        self.assertEqual(landed, "6",
+                         f"up landed on sentence {landed} of 6, not the last")
 
     def test_the_up_arrow_at_the_very_start_stays_put(self):
         # One press too many must not drop out of the reading.
