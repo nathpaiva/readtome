@@ -69,9 +69,28 @@ def installed_voices() -> frozenset[str]:
     return frozenset(names)
 
 
+def voice_variable(lang: str) -> str:
+    """The environment variable that pins the voice for this language."""
+    return f"READTOME_VOICE_{lang.upper()}"
+
+
 @functools.lru_cache(maxsize=None)
 def best_voice(lang: str) -> str:
-    """The first voice we want for this language that is installed here."""
+    """The voice for this language: yours if you named one, else the best here.
+
+    A name from the environment is checked before it is used. `say` takes an
+    unknown voice, exits 0, and reads the whole document in the default voice,
+    so a typo would quietly give you the wrong voice for an hour.
+    """
+    variable = voice_variable(lang)
+    chosen = os.environ.get(variable, "").strip()
+    if chosen:
+        if chosen not in installed_voices():
+            raise RuntimeError(
+                f"{variable} is set to {chosen!r}, which is not installed. "
+                "Run `say -v '?'` to see the voices you have.")
+        return chosen
+
     wanted = VOICES.get(lang, VOICES["en"])
     here = installed_voices()
     for name in wanted:
